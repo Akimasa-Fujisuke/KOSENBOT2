@@ -11,7 +11,7 @@ from appwrite.client import Client
 from appwrite.services.databases import Databases
 from appwrite.id import ID
 
-# ログに出る非推奨警告(DeprecationWarning)を非表示にする
+# ログに出る非推奨警告を非表示にする
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 intents = discord.Intents.default()
@@ -46,7 +46,6 @@ async def load_data_from_appwrite():
     gakushoku_links = []
 
     try:
-        # 💡 asyncio.to_thread を使い、メインループをフリーズさせずに裏でデータを取得する
         response_kadai = await asyncio.to_thread(databases.list_documents, DATABASE_ID, COLLECTION_KADAI)
         for doc in response_kadai['documents']:
             dt_str = doc['remind_at'].split('.')[0].replace('T', ' ') 
@@ -77,7 +76,7 @@ async def on_ready():
     new_activity = f"at NNCT" 
     await bot.change_presence(activity=discord.Game(new_activity))
 
-    # 💡 バックグラウンドタスクとして走らせることで起動時のタイムアウトを完全回避
+    # バックグラウンドタスクとして走らせる
     asyncio.create_task(load_data_from_appwrite())
 
     try:
@@ -106,7 +105,7 @@ class KadaiGroup(app_commands.Group):
         date_str: str,
         time_str: str,
     ):
-        # 💡 最初に応答を保留(defer)する
+        # 最初に応答を保留(defer)する ➔ これで「考え中」になる
         await interaction.response.defer()
 
         try:
@@ -125,7 +124,7 @@ class KadaiGroup(app_commands.Group):
                 "channel_id": str(interaction.channel_id)
             }
             
-            # 💡 Appwriteとの通信を別スレッドに逃がす
+            # Appwriteへの保存処理
             doc = await asyncio.to_thread(databases.create_document, DATABASE_ID, COLLECTION_KADAI, ID.unique(), data)
 
             task_info = {
@@ -147,9 +146,11 @@ class KadaiGroup(app_commands.Group):
         except ValueError:
             await interaction.followup.send(
                 "❌ 入力形式が正しくありません。\n"
-                "日付は `YYYY/MM/DD`、時間は `HH:MM` の形式で入力してください。\n"
-                "例: `2026/07/25` と `23:59`"
+                "日付は `YYYY/MM/DD`、時間は `HH:MM` の形式で入力してください。"
             )
+        except Exception as e:
+            # 💡 💡 ここが超重要！通信エラーなどのあらゆるエラーを捕まえて、考え中を解除して画面に出す！
+            await interaction.followup.send(f"❌ 登録中にエラーが発生しました:\n`{e}`")
 
 bot.tree.add_command(KadaiGroup(name="kadai", description="課題管理コマンド"))
 
@@ -201,7 +202,7 @@ class gakushokuGroup(app_commands.Group):
             
             await interaction.followup.send(f"✅ 学食メニューを登録しました！\nリンク: {link}")
         except Exception as e:
-            await interaction.followup.send(f"❌ 登録中にエラーが発生しました: {e}")
+            await interaction.followup.send(f"❌ 登録中にエラーが発生しました:\n`{e}`")
 
     @app_commands.command(name="list", description="学食のメニューを表示します")
     async def gakushoku_list(self, interaction: discord.Interaction):
