@@ -11,7 +11,7 @@ from appwrite.client import Client
 from appwrite.services.databases import Databases
 from appwrite.id import ID
 
-# 💡 ログに出る非推奨警告(DeprecationWarning)を非表示にする
+# ログに出る非推奨警告(DeprecationWarning)を非表示にする
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 intents = discord.Intents.default()
@@ -35,17 +35,18 @@ client.set_key(APPWRITE_API_KEY)
 
 databases = Databases(client)
 
+# メモリ保持用のリスト
 kadai_tasks = []
 gakushoku_links = []
 
 async def load_data_from_appwrite():
-    """起動時にAppwriteからデータを読み込んでリストを同期する関数"""
+    """起動時にAppwriteからデータを【非同期で】読み込んでリストを同期する関数"""
     global kadai_tasks, gakushoku_links
     kadai_tasks = []
     gakushoku_links = []
 
     try:
-        # 💡 asyncio.to_thread を使って非同期でデータを取得
+        # 💡 asyncio.to_thread を使い、メインループをフリーズさせずに裏でデータを取得する
         response_kadai = await asyncio.to_thread(databases.list_documents, DATABASE_ID, COLLECTION_KADAI)
         for doc in response_kadai['documents']:
             dt_str = doc['remind_at'].split('.')[0].replace('T', ' ') 
@@ -76,7 +77,7 @@ async def on_ready():
     new_activity = f"at NNCT" 
     await bot.change_presence(activity=discord.Game(new_activity))
 
-    # 💡 非同期でデータをロード
+    # 💡 非同期で安全にデータをロード
     await load_data_from_appwrite()
 
     try:
@@ -105,7 +106,7 @@ class KadaiGroup(app_commands.Group):
         date_str: str,
         time_str: str,
     ):
-        # 💡 3秒ルールによるタイムアウトを防ぐため、最初に応答を保留(defer)する
+        # 💡 3秒ルールによるタイムアウトを防ぐため、最初に応答を保留(defer)する。これで15分まで耐えられる
         await interaction.response.defer()
 
         try:
@@ -114,7 +115,7 @@ class KadaiGroup(app_commands.Group):
             now = datetime.now()
 
             if target_datetime < now:
-                # 💡 deferした後は send_message ではなく followup.send を使う
+                # 💡 deferした後は followup.send を使う
                 await interaction.followup.send("❌ 過去の日時は指定できません。未来の日時を入力してください。")
                 return
 
@@ -125,7 +126,7 @@ class KadaiGroup(app_commands.Group):
                 "channel_id": str(interaction.channel_id)
             }
             
-            # 💡 Appwriteとの通信を別スレッドに逃がして、Botのフリーズを防ぐ
+            # 💡 Appwriteとの通信を別スレッドに逃がしてBotのフリーズを防ぐ
             doc = await asyncio.to_thread(databases.create_document, DATABASE_ID, COLLECTION_KADAI, ID.unique(), data)
 
             task_info = {
@@ -172,7 +173,6 @@ async def check_schedule():
 
     for task in completed_tasks:
         try:
-            # 💡 ループ内での削除処理も非同期化
             await asyncio.to_thread(databases.delete_document, DATABASE_ID, COLLECTION_KADAI, task["document_id"])
             kadai_tasks.remove(task)
         except Exception as e:
