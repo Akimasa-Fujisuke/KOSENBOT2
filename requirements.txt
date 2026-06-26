@@ -1,2 +1,2 @@
 discord.py
-pip install appwrite
+appwrite
