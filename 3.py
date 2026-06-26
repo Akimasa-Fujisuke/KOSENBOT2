@@ -77,8 +77,8 @@ async def on_ready():
     new_activity = f"at NNCT" 
     await bot.change_presence(activity=discord.Game(new_activity))
 
-    # 💡 非同期で安全にデータをロード
-    await load_data_from_appwrite()
+    # 💡 バックグラウンドタスクとして走らせることで起動時のタイムアウトを完全回避
+    asyncio.create_task(load_data_from_appwrite())
 
     try:
         synced = await bot.tree.sync()
@@ -106,7 +106,7 @@ class KadaiGroup(app_commands.Group):
         date_str: str,
         time_str: str,
     ):
-        # 💡 3秒ルールによるタイムアウトを防ぐため、最初に応答を保留(defer)する。これで15分まで耐えられる
+        # 💡 最初に応答を保留(defer)する
         await interaction.response.defer()
 
         try:
@@ -115,7 +115,6 @@ class KadaiGroup(app_commands.Group):
             now = datetime.now()
 
             if target_datetime < now:
-                # 💡 deferした後は followup.send を使う
                 await interaction.followup.send("❌ 過去の日時は指定できません。未来の日時を入力してください。")
                 return
 
@@ -126,7 +125,7 @@ class KadaiGroup(app_commands.Group):
                 "channel_id": str(interaction.channel_id)
             }
             
-            # 💡 Appwriteとの通信を別スレッドに逃がしてBotのフリーズを防ぐ
+            # 💡 Appwriteとの通信を別スレッドに逃がす
             doc = await asyncio.to_thread(databases.create_document, DATABASE_ID, COLLECTION_KADAI, ID.unique(), data)
 
             task_info = {
