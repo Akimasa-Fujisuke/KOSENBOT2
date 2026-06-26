@@ -16,4 +16,4 @@ COPY . .
 RUN chmod -R 755 /app
 
 # ボットを実行（2.py を実行）
-CMD ["python", "2.py"]
+CMD ["python", "3.py"]
