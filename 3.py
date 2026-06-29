@@ -93,7 +93,7 @@ async def on_ready():
     if is_bot_initialized:
         return
 
-    new_activity = f"at NNCT" 
+    new_activity = f"by NNCT" 
     await bot.change_presence(activity=discord.Game(new_activity))
 
     # バックグラウンドタスクとして走らせる
