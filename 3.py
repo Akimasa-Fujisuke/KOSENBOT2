@@ -39,14 +39,23 @@ databases = Databases(client)
 kadai_tasks = []
 gakushoku_links = []
 
+# Botがすでに初期化されたかを記録するフラグ
+is_bot_initialized = False
+
 async def load_data_from_appwrite():
-    """起動時にAppwriteからデータを【非同期で】読み込んでリストを同期する関数"""
+    """起動時にAppwriteからデータを読み込む関数（回線悪化対策付き）"""
     global kadai_tasks, gakushoku_links
     kadai_tasks = []
     gakushoku_links = []
 
     try:
-        response_kadai = await asyncio.to_thread(databases.list_documents, DATABASE_ID, COLLECTION_KADAI)
+        # 💡 Appwriteが重すぎるとき、5秒で通信をあきらめてBotのフリーズを防ぐ
+        print("Appwriteからのデータ同期を開始します...")
+        
+        response_kadai = await asyncio.wait_for(
+            asyncio.to_thread(databases.list_documents, DATABASE_ID, COLLECTION_KADAI),
+            timeout=5.0
+        )
         for doc in response_kadai['documents']:
             dt_str = doc['remind_at'].split('.')[0].replace('T', ' ') 
             kadai_tasks.append({
@@ -57,7 +66,10 @@ async def load_data_from_appwrite():
                 "channel_id": int(doc['channel_id'])
             })
 
-        response_gaku = await asyncio.to_thread(databases.list_documents, DATABASE_ID, COLLECTION_GAKUSHOKU)
+        response_gaku = await asyncio.wait_for(
+            asyncio.to_thread(databases.list_documents, DATABASE_ID, COLLECTION_GAKUSHOKU),
+            timeout=5.0
+        )
         for doc in response_gaku['documents']:
             gakushoku_links.append({
                 "document_id": doc['$id'],
@@ -65,6 +77,8 @@ async def load_data_from_appwrite():
                 "channel_id": int(doc['channel_id'])
             })
         print("Appwriteデータベースからデータを同期しました。")
+    except asyncio.TimeoutError:
+        print("⚠️ 【警告】Appwriteの応答が遅すぎるため、起動時の同期をタイムアウトしました。")
     except Exception as e:
         print(f"Appwriteからのデータ読み込みエラー: {e}")
 
@@ -72,7 +86,13 @@ async def load_data_from_appwrite():
 
 @bot.event
 async def on_ready():
+    global is_bot_initialized
+    
     print(f"ログインしました: {bot.user.name}")
+    
+    if is_bot_initialized:
+        return
+
     new_activity = f"at NNCT" 
     await bot.change_presence(activity=discord.Game(new_activity))
 
@@ -88,6 +108,8 @@ async def on_ready():
     if not check_schedule.is_running():
         reset_gakushoku_menu.start()
         check_schedule.start()
+        
+    is_bot_initialized = True
 
 
 class KadaiGroup(app_commands.Group):
@@ -105,7 +127,7 @@ class KadaiGroup(app_commands.Group):
         date_str: str,
         time_str: str,
     ):
-        # 最初に応答を保留(defer)する ➔ これで「考え中」になる
+        # 最初に応答を保留(defer)
         await interaction.response.defer()
 
         try:
@@ -114,7 +136,7 @@ class KadaiGroup(app_commands.Group):
             now = datetime.now()
 
             if target_datetime < now:
-                await interaction.followup.send("❌ 過去の日時は指定できません。未来の日時を入力してください。")
+                await interaction.followup.send("❌ 過去の日時は指定できません。")
                 return
 
             data = {
@@ -124,32 +146,53 @@ class KadaiGroup(app_commands.Group):
                 "channel_id": str(interaction.channel_id)
             }
             
-            # Appwriteへの保存処理
-            doc = await asyncio.to_thread(databases.create_document, DATABASE_ID, COLLECTION_KADAI, ID.unique(), data)
+            # 💡 💡 ここが今回のコア！
+            # Appwriteへの保存が「2.5秒」を超えたら強制打ち切り！Discordへの返信を最優先する！
+            try:
+                doc = await asyncio.wait_for(
+                    asyncio.to_thread(databases.create_document, DATABASE_ID, COLLECTION_KADAI, ID.unique(), data),
+                    timeout=2.5
+                )
+                
+                task_info = {
+                    "document_id": doc['$id'],
+                    "title": title,
+                    "remind_at": target_datetime,
+                    "user_id": interaction.user.id,
+                    "channel_id": interaction.channel_id,
+                }
+                kadai_tasks.append(task_info)
 
-            task_info = {
-                "document_id": doc['$id'],
-                "title": title,
-                "remind_at": target_datetime,
-                "user_id": interaction.user.id,
-                "channel_id": interaction.channel_id,
-            }
-            kadai_tasks.append(task_info)
+                formatted_time = target_datetime.strftime("%Y/%m/%d %H:%M")
+                await interaction.followup.send(
+                    f"✅ 課題を登録しました！\n"
+                    f"**タイトル:** {title}\n"
+                    f"**通知日時:** {formatted_time} にメンションします。"
+                )
 
-            formatted_time = target_datetime.strftime("%Y/%m/%d %H:%M")
-            await interaction.followup.send(
-                f"✅ 課題を登録しました！\n"
-                f"**タイトル:** {title}\n"
-                f"**通知日時:** {formatted_time} にメンションします。"
-            )
+            except asyncio.TimeoutError:
+                # Appwriteの回線がクソ重いときは、メモリ（Bot内）にだけ保存してユーザーには成功と伝える！
+                # これでユーザーを待たせない究極の回避策だぜ！
+                fake_id = f"temp_{int(datetime.now().timestamp())}"
+                task_info = {
+                    "document_id": fake_id,
+                    "title": title,
+                    "remind_at": target_datetime,
+                    "user_id": interaction.user.id,
+                    "channel_id": interaction.channel_id,
+                }
+                kadai_tasks.append(task_info)
+                
+                formatted_time = target_datetime.strftime("%Y/%m/%d %H:%M")
+                await interaction.followup.send(
+                    f"⚠️ **Appwriteの回線が混雑しています（応答なし）**\n"
+                    f"ただし、Botの一時メモリに課題を登録しました！通知は正常に飛びます。\n"
+                    f"**タイトル:** {title} / **日時:** {formatted_time}"
+                )
 
         except ValueError:
-            await interaction.followup.send(
-                "❌ 入力形式が正しくありません。\n"
-                "日付は `YYYY/MM/DD`、時間は `HH:MM` の形式で入力してください。"
-            )
+            await interaction.followup.send("❌ 日付は `YYYY/MM/DD`、時間は `HH:MM` の形式で入力してください。")
         except Exception as e:
-            # 💡 💡 ここが超重要！通信エラーなどのあらゆるエラーを捕まえて、考え中を解除して画面に出す！
             await interaction.followup.send(f"❌ 登録中にエラーが発生しました:\n`{e}`")
 
 bot.tree.add_command(KadaiGroup(name="kadai", description="課題管理コマンド"))
@@ -173,7 +216,12 @@ async def check_schedule():
 
     for task in completed_tasks:
         try:
-            await asyncio.to_thread(databases.delete_document, DATABASE_ID, COLLECTION_KADAI, task["document_id"])
+            # もしタイムアウト時の暫定IDじゃなければAppwriteからも消す
+            if not str(task["document_id"]).startswith("temp_"):
+                await asyncio.wait_for(
+                    asyncio.to_thread(databases.delete_document, DATABASE_ID, COLLECTION_KADAI, task["document_id"]),
+                    timeout=3.0
+                )
             kadai_tasks.remove(task)
         except Exception as e:
             print(f"課題の削除エラー: {e}")
@@ -191,16 +239,31 @@ class gakushokuGroup(app_commands.Group):
                 "link": link,
                 "channel_id": str(interaction.channel_id)
             }
-            doc = await asyncio.to_thread(databases.create_document, DATABASE_ID, COLLECTION_GAKUSHOKU, ID.unique(), data)
-
-            link_info = {
-                "document_id": doc['$id'],
-                "link": link,
-                "channel_id": interaction.channel_id,
-            }
-            gakushoku_links.append(link_info)
             
-            await interaction.followup.send(f"✅ 学食メニューを登録しました！\nリンク: {link}")
+            try:
+                doc = await asyncio.wait_for(
+                    asyncio.to_thread(databases.create_document, DATABASE_ID, COLLECTION_GAKUSHOKU, ID.unique(), data),
+                    timeout=2.5
+                )
+                link_info = {
+                    "document_id": doc['$id'],
+                    "link": link,
+                    "channel_id": interaction.channel_id,
+                }
+                gakushoku_links.append(link_info)
+                await interaction.followup.send(f"✅ 学食メニューを登録しました！\nリンク: {link}")
+            
+            except asyncio.TimeoutError:
+                # 学食もタイムアウトしたらメモリ救済
+                fake_id = f"temp_{int(datetime.now().timestamp())}"
+                link_info = {
+                    "document_id": fake_id,
+                    "link": link,
+                    "channel_id": interaction.channel_id,
+                }
+                gakushoku_links.append(link_info)
+                await interaction.followup.send(f"⚠️ **Appwrite応答なし（回線混雑）**\nBotの一時メモリに学食メニューを登録しました！\nリンク: {link}")
+                
         except Exception as e:
             await interaction.followup.send(f"❌ 登録中にエラーが発生しました:\n`{e}`")
 
@@ -226,7 +289,11 @@ async def reset_gakushoku_menu():
     if now.weekday() == 6 and now.hour == 23 and now.minute == 59:
         for link_info in gakushoku_links:
             try:
-                await asyncio.to_thread(databases.delete_document, DATABASE_ID, COLLECTION_GAKUSHOKU, link_info["document_id"])
+                if not str(link_info["document_id"]).startswith("temp_"):
+                    await asyncio.wait_for(
+                        asyncio.to_thread(databases.delete_document, DATABASE_ID, COLLECTION_GAKUSHOKU, link_info["document_id"]),
+                        timeout=3.0
+                    )
             except Exception as e:
                 print(f"学食データの削除エラー: {e}")
                 
